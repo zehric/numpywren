@@ -311,6 +311,7 @@ async def lambdapack_run_async(loop, program, computer, cache, shared_state, pip
             await asyncio.sleep(0)
             # go from high priority -> low priority
             for queue_url in program.queue_urls[::-1]:
+                #print("QUEUE_URL", queue_url)
                 async with session.create_client('sqs', use_ssl=False,  region_name=program.control_plane.region) as sqs_client:
                     messages = await sqs_client.receive_message(QueueUrl=queue_url, MaxNumberOfMessages=1)
                 if ("Messages" not in messages):

@@ -241,7 +241,7 @@ class RemoteRead(RemoteInstruction):
         print("===========")
         if (self.result is None):
             cache_key = (self.matrix.key, self.matrix.bucket, self.matrix.true_block_idx(*self.bidxs))
-            if (self.cache != None and cache_key in self.cache):
+            if (False and self.cache != None and cache_key in self.cache):
               t = time.time()
               self.result = self.cache[cache_key]
               self.cache_hit = True
@@ -262,9 +262,9 @@ class RemoteRead(RemoteInstruction):
                   await asyncio.sleep(backoff)
                   backoff *= 2
                   pass
-              self.size = sys.getsizeof(self.result)
-              if (self.cache != None):
-                self.cache[cache_key] = self.result
+              # self.size = sys.getsizeof(self.result)
+              # if (self.cache != None):
+              #   self.cache[cache_key] = self.result
               e = time.time()
         self.end_time = time.time()
         e = time.time()

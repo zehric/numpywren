@@ -24,7 +24,7 @@ import pywren.wrenconfig as wc
 
 import multiprocessing
 from pywren import ec2standalone
-
+import concurrent.futures as fs
 
 
 
@@ -32,14 +32,21 @@ from pywren import ec2standalone
 
 def run_program_in_pywren(program, num_instances, num_cores):
     def pywren_run(_):
-        job_runner.lambdapack_run(program, timeout=60, idle_timeout=6)
+        job_runner.lambdapack_run(program, timeout=3600, idle_timeout=30)
     default_npw_config = npw.config.default()
     pywren_config = wc.default()
     npw_config = npw.config.default()
     pywren_config['runtime']['s3_bucket'] = npw_config['runtime']['bucket']
     pywren_config['runtime']['s3_key'] = npw_config['runtime']['s3_key']
-    pwex = get_executor(num_cores)
-    futures = pwex.map(pywren_run, range(num_instances*num_cores))
+    
+    
+    # pwex = get_executor(num_cores)
+    # futures = pwex.map(pywren_run, range(num_instances*num_cores))
+    # program.start()
+
+    executor = fs.ProcessPoolExecutor(num_cores)
+    program.start()
+    futures = executor.submit(job_runner.lambdapack_run, program, timeout=3600, idle_timeout=30)
     return futures
 
 
@@ -48,18 +55,31 @@ def benchmark_function(num_instances,
                        num_cores, 
                        run_func,
                        args):
-    program, meta =  run_func(*args)
+    print(pcolor.FAIL, end="")
     print("Running: {0}".format(run_func.__name__))
+    print(pcolor.ENDC)
+    
     t = time.time()
+    program, meta =  run_func(*args)
+    t_program = time.time()
     futures = run_program_in_pywren(program, num_instances, num_cores)
-    program.start()
+    #program.start()
     program.wait()
-    program.free()
     e = time.time()
+    time.sleep(20)
+    program.free()
+    L_sharded = meta["outputs"][0]
+    print(pcolor.FAIL, end="")
+    print("L_sharded.shape: {0}".format(L_sharded.shape))
+    print(pcolor.ENDC)
     ret_dict = {}
     ret_dict['total_time_te'] = (t, e)
     ret_dict['total_time'] = e-t
-    np.save("{0}/{1}.npy".format(RESULT_DIR, OUTPUT_NAME()), result_dict)
+    np.save("{0}/{1}.npy".format(RESULT_DIR, OUTPUT_NAME()), ret_dict)
+
+    print(pcolor.FAIL, end="")
+    print("Total time: {0} seconds".format(ret_dict['total_time']), end="")
+    print(pcolor.ENDC)
 
 
 
@@ -262,33 +282,19 @@ def gen_sharded_mat(pwex, config, problem_size, shard_size, num_rows_per_block, 
 
     X = np.random.randn(problem_size, 1)
     shard_sizes = [shard_size, 1]
-    X2 = np.random.randn(problem_size, 1)
-    shard_sizes2 = [shard_size, 1]
-    if num_rows_per_block != 0: 
-        shard_sizes = [num_rows_per_block, 1]
-        sr = num_rows_per_block
     if '{0}_{1}_{2}'.format(nr,nc,sr) not in bigm_descs:
-        X_sharded = BigMatrix("rp_local_test_{0}_{1}--1".format(problem_size, shard_size),
+        X_sharded = BigMatrix("rp_local_test_{0}_{1}".format(problem_size, shard_size),
                               shape=X.shape, shard_sizes=shard_sizes,
                               write_header=True,
                               autosqueeze=False,
                               bucket=DEFAULT_BUCKET,
                               parent_fn=matrix_utils.constant_zeros,
                               use_cache=False)
-        X_sharded2 = BigMatrix("rp_local_test_{0}_{1}--2".format(problem_size, shard_size),
-                              shape=X2.shape, shard_sizes=shard_sizes2,
-                              write_header=True,
-                              autosqueeze=False,
-                              bucket=DEFAULT_BUCKET,
-                              parent_fn=matrix_utils.constant_zeros,
-                              use_cache=False)
         shard_matrix(X_sharded, X)
-        shard_matrix(X_sharded2, X2)
 
         t = time.time()
         print("------------------------------(X_sharded.shape) = ", X_sharded.shape)
-        print("------------------------------(X_sharded2.shape) = ", X_sharded2.shape)
-        ret = binops.gemm(pwex, X_sharded, X_sharded2.T, overwrite=False, gemm_chunk_size=16, local=True)
+        ret = binops.gemm(pwex, X_sharded, X_sharded.T, overwrite=False, gemm_chunk_size=16, local=True)
         e = time.time()
         print("------------------------------GEMM took {0} seconds".format(e - t))
         print("------------------------------ret.shape={0}".format(ret.shape))
@@ -297,7 +303,9 @@ def gen_sharded_mat(pwex, config, problem_size, shard_size, num_rows_per_block, 
         np.save(shard_mats, bigm_descs)
 
 
-    return get_bigm(bigm_descs['{0}_{1}_{2}'.format(nr,nc,sr)], args)
+    mat = get_bigm(bigm_descs['{0}_{1}_{2}'.format(nr,nc,sr)], args)
+    mat.lambdav = problem_size*20e12
+    return mat
 
 def initialize(args):
     global BLOCK_SIZE, NUM_BLOCK_ROWS, NUM_INSTANCES, NUM_CORES, TRIAL_NUMBER, \
@@ -313,7 +321,7 @@ def initialize(args):
     
 
     
-    OUTPUT_NAME = lambda : "{0}_{1}_{2}--{3}".format(args.run_func, BLOCK_SIZE, NUM_BLOCK_ROWS, TRIAL_NUMBER)
+    OUTPUT_NAME = lambda : "{0}_wc_{1}__{2}_{3}--{4}".format(args.run_func, args.with_cache, BLOCK_SIZE, NUM_BLOCK_ROWS, TRIAL_NUMBER)
     BENCHMARK_DIR = SAVE_FOLDER
     FIGURE_DIR = '{0}/figures'.format(BENCHMARK_DIR)
     MAT_DIR = '{0}/mat_data'.format(BENCHMARK_DIR)
@@ -361,7 +369,7 @@ def initialize(args):
     MAT = gen_sharded_mat(pwex_l, config, BLOCK_SIZE*NUM_BLOCK_ROWS, BLOCK_SIZE, num_rows_per_block=BLOCK_SIZE, save_path=mat_dat_path, args=args)
     print()
 
-    if args.launch_group:
+    if args.launch_group and False:
         print(pcolor.FAIL+"Launching instances..."+pcolor.ENDC)
         launch_instance_group(NUM_INSTANCES,NUM_CORES,cache_size=40)
         print(pcolor.OKGREEN+"Finished launching."+pcolor.ENDC)
@@ -399,21 +407,28 @@ if __name__ == "__main__":
                         'launch'   : None}
 
     args = parser.parse_args()
+    args.launch_group = (args.launch_group.lower() == 'true')
+    args.terminate_after = (args.terminate_after.lower() == 'true')
     args.use_cache = (args.use_cache.lower() == 'true')
 
-    print(args)
+    print(pcolor.OKBLUE,end="")
+    print(args,end="")
+    print(pcolor.ENDC)
 
     print("Initializing")
     initialize(args)
 
 
-    args.run_func = run_func_mapping[args.run_func]
+    run_func = run_func_mapping[args.run_func]
 
 
     
-    if args.run_func is not None:
+    if run_func is not None:
         s = time.time()
-        benchmark_function(num_instances=NUM_INSTANCES, num_cores=NUM_CORES, run_func=args.run_func, args=[MAT])
+        a = [MAT]
+        if args.run_func == 'gemm':
+            a = [MAT, MAT]
+        benchmark_function(num_instances=NUM_INSTANCES, num_cores=NUM_CORES, run_func=run_func, args=a)
         e = time.time()
         print(s, e, (e-s))
 
