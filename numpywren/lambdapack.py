@@ -69,11 +69,6 @@ class ProgramStatus(Enum):
     NOT_STARTED = 3
 
 def put(client, key, value, s3=False, s3_bucket=""):
-    print()
-    print()
-    print(client, key, value, s3, s3_bucket)
-    print()
-    print()
     #TODO: fall back to S3 here
     if (s3):
       # flush write to S3
