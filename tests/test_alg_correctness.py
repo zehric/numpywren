@@ -33,7 +33,7 @@ def test_cholesky():
     A = X.dot(X.T) + np.eye(X.shape[0])
     shard_size = 16
     shard_sizes = (shard_size, shard_size)
-    A_sharded= BigMatrix("cholesky_test_A", shape=A.shape, shard_sizes=shard_sizes, write_header=True)
+    A_sharded= BigMatrix("cholesky_test_A", shape=A.shape, shard_sizes=shard_sizes, write_header=True, use_cache=False)
     A_sharded.free()
     shard_matrix(A_sharded, A)
     program, meta =  cholesky(A_sharded)
@@ -244,5 +244,6 @@ if __name__ == "__main__":
     #test_tsqr_lambda()
     #test_gemm_lambda()
     #test_qr_lambda()
+    test_cholesky()
     pass
 

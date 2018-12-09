@@ -19,6 +19,9 @@ import pywren.wrenconfig as wc
 import dill
 from collections import defaultdict
 
+from . import fastclient
+from .fastclient import FastClient
+
 from . import matrix_utils
 from .matrix_utils import list_all_keys, block_key_to_block, get_local_matrix, key_exists_async
 from . import utils
@@ -85,7 +88,8 @@ class BigMatrix(object):
                  autosqueeze=True,
                  lambdav=0.0,
                  region=DEFAULT_REGION,
-                 safe=True):
+                 safe=True,
+                 use_cache=False):
         if bucket is None:
             bucket = os.environ.get('PYWREN_LINALG_BUCKET')
             if bucket is None:
@@ -102,6 +106,10 @@ class BigMatrix(object):
         self.autosqueeze = autosqueeze
         self.lambdav = lambdav
         self.region = region
+        self.use_cache = use_cache
+        if self.use_cache:
+            self.fclient = FastClient(so_bucket="zehric-pywren-149")
+        
         if (shape == None or shard_sizes == None):
             header = self.__read_header__()
         else:
@@ -263,11 +271,29 @@ class BigMatrix(object):
         return block_idx
 
     def get_block(self, *block_idx):
+        if self.use_cache:
+            self.fclient.cache_so()
+
         loop = asyncio.new_event_loop()
         #asyncio.set_event_loop(loop)
         get_block_async_coro = self.get_block_async(loop, *block_idx)
         res = loop.run_until_complete(asyncio.ensure_future(get_block_async_coro, loop=loop))
         return res
+
+        # key = self.__shard_idx_to_key__(block_idx)
+        # ret_key = self.fclient.pin_objects2([key], num_threads=1)[0]
+        # ret_key = ret_key.decode('utf-8')
+
+        # bio = open(ret_key, 'rb')
+        # X_block = np.load(bio)
+        # bio.close()
+        # #X_block = np.load(ret_key, mmap_mode='r')
+        # if (self.autosqueeze):
+        #     X_block = np.squeeze(X_block)
+        # if (len(set(block_idx)) == 1 and len(set(self.shape)) == 1 and len(self.shape) != 1):
+        #     idxs = np.diag_indices(X_block.shape[0])
+        #     X_block[idxs] += self.lambdav
+        # return X_block
 
     async def get_block_async(self, loop, *block_idx):
         """
@@ -283,30 +309,58 @@ class BigMatrix(object):
         block : ndarray
             The block at the given index as a numpy array.
         """
+        logger.log(logging.DEBUG, "(get_block_async): start")
         if (loop == None):
             loop = asyncio.get_event_loop()
         if (len(block_idx) != len(self.shape)):
             print("block_idx", block_idx)
             print("shape", self.shape)
             raise Exception("Get block query does not match shape {0} vs {1}".format(block_idx, self.shape))
+        
         key = self.__shard_idx_to_key__(block_idx)
+        start = time.time()
         exists = await key_exists_async(self.bucket, key, loop)
+        end = time.time()
+        #logger.log(logging.DEBUG, "(get_block_async): time to verify key exists = %0.5f seconds" % (end-start))
+        start = end
         if (not exists and dill.loads(self.parent_fn) == None):
             logger.warning(self.bucket)
             logger.warning(key)
             logger.warning(block_idx)
             raise Exception("Key does {0} not exist, and no parent function prescripted".format(key))
         elif (not exists and dill.loads(self.parent_fn) != None):
+            #logger.log(logging.DEBUG, "(get_block_async): loading block with dill")
             X_block = await dill.loads(self.parent_fn)(self, loop, *block_idx)
+
         else:
-            bio = await self.__s3_key_to_byte_io__(key, loop=loop)
-            X_block = np.load(bio)
+            if self.use_cache:
+                ret_key = self.fclient.pin_objects2([key], num_threads=1)[0]
+                ret_key = ret_key.decode('utf-8')
+                bio = open(ret_key, 'rb')
+                X_block = np.load(bio)
+                bio.close()
+            else:
+                logger.log(logging.DEBUG, "(get_block_async): loading block from S3")
+                bio = await self.__s3_key_to_byte_io__(key, loop=loop)
+                X_block = np.load(bio)
+
+        end = time.time()
+        #logger.log(logging.DEBUG, "(get_block_async): time to retrieve block = %0.5f seconds" % (end-start))
+        start = end
         if (self.autosqueeze):
             X_block = np.squeeze(X_block)
         if (len(set(block_idx)) == 1 and len(set(self.shape)) == 1 and len(self.shape) != 1):
             idxs = np.diag_indices(X_block.shape[0])
             X_block[idxs] += self.lambdav
+        end = time.time()
+        #logger.log(logging.DEBUG, "(get_block_async): time to finish up = %0.5f seconds" % (end-start))
+        #logger.log(logging.DEBUG, "(get_block_async): exit")
         return X_block
+
+    def release_block(self, *block_idx):
+        if self.use_cache:
+            key = self.__shard_idx_to_key__(block_idx)
+            self.fclient.release_objects([key], num_threads=1)
 
     def put_block(self, block, *block_idx):
         loop = asyncio.new_event_loop()

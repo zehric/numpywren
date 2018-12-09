@@ -69,6 +69,11 @@ class ProgramStatus(Enum):
     NOT_STARTED = 3
 
 def put(client, key, value, s3=False, s3_bucket=""):
+    print()
+    print()
+    print(client, key, value, s3, s3_bucket)
+    print()
+    print()
     #TODO: fall back to S3 here
     if (s3):
       # flush write to S3
@@ -253,7 +258,9 @@ class RemoteRead(RemoteInstruction):
               print(f"Reading from {self.matrix} at {self.bidxs}")
               while (True):
                 try:
-                  self.result = await asyncio.wait_for(self.matrix.get_block_async(loop, *self.bidxs), self.MAX_READ_TIME)
+                  #self.result = await asyncio.wait_for(self.matrix.get_block_async(loop, *self.bidxs), self.MAX_READ_TIME)
+                  self.result = self.matrix.get_block(*self.bidxs)
+                  self.matrix.release(*self.bidxs)
                   print("read shape", self.result.shape)
                   break
                 except (asyncio.TimeoutError, aiohttp.client_exceptions.ClientPayloadError, fs._base.CancelledError, botocore.exceptions.ClientError):

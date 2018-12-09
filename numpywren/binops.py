@@ -125,6 +125,7 @@ def gemm(pwex, X, Y, out_bucket=None, tasks_per_job=1, local=False, dtype=np.flo
     root_key = generate_key_name_binop(X, Y, "gemm")
     if (Y.shard_sizes[0] !=  X.shard_sizes[1]):
         raise Exception("X dim 1 shard size must match Y dim 0 shard size")
+    print("Defining BigMatrix")
     XY = BigMatrix(root_key, shape=(X.shape[0], Y.shape[1]), bucket=out_bucket, shard_sizes=[X.shard_sizes[0], Y.shard_sizes[1]], dtype=dtype, write_header=True)
 
 
@@ -158,7 +159,8 @@ def gemm(pwex, X, Y, out_bucket=None, tasks_per_job=1, local=False, dtype=np.flo
             list(map(pywren_run, c))
         else:
             s = time.time()
-            futures = pwex.map(pywren_run, c, exclude_modules=["site-packages"])
+            print("mapping to lambda")
+            futures = pwex.map(pywren_run, c, exclude_modules=["site-packages"], extra_env={"AWS_DEFAULT_REGION": 'us-west-2'})
             e = time.time()
             print("Pwex Map Time {0}".format(e - s))
             all_futures.append((i,futures))
