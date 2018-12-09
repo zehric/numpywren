@@ -253,9 +253,9 @@ class RemoteRead(RemoteInstruction):
               print(f"Reading from {self.matrix} at {self.bidxs}")
               while (True):
                 try:
-                  #self.result = await asyncio.wait_for(self.matrix.get_block_async(loop, *self.bidxs), self.MAX_READ_TIME)
-                  self.result = self.matrix.get_block(*self.bidxs)
-                  self.matrix.release(*self.bidxs)
+                  self.result = await asyncio.wait_for(self.matrix.get_block_async(loop, *self.bidxs), self.MAX_READ_TIME)
+                  #self.result = self.matrix.get_block(*self.bidxs)
+                  self.matrix.release_block(*self.bidxs)
                   print("read shape", self.result.shape)
                   break
                 except (asyncio.TimeoutError, aiohttp.client_exceptions.ClientPayloadError, fs._base.CancelledError, botocore.exceptions.ClientError):
