@@ -98,7 +98,7 @@ CacheEntry::~CacheEntry() {
 void CacheEntry::download(long _size) {
     memmap(_size);
     // TODO: download from s3();
-    std::cout << "Downloading object of size: " << _size << std::endl;
+    //std::cout << "Downloading object of size: " << _size << std::endl;
     get_object(data, size, bucket, key.c_str());
     /* std::cerr << "download from s3: " << file_path << "\n"; */
 }
@@ -141,23 +141,24 @@ Cache::Cache(int size) {
 }
 
 std::string Cache::get(std::string key) {
-    std::cout << "Requesting key: " << key << std::endl;
+    //std::cout << "Requesting key: " << key << std::endl;
 
     std::unique_lock<std::mutex> lock(mutex);
     CacheEntry *entry;
     if (entries.find(key) != entries.end()) {
-        std::cout << "Hit: " << key << std::endl;
+        //std::cout << "Hit: " << key << std::endl;
         entry = entries[key];
         entry->ref_cnt += 1;
         while (entry->loading) {
             entry->cv.wait(lock);
         }
         hits++;
+        std::cout << "Hit: " << key << "  Total hits: " << hits << "/" << (hits+misses) << std::endl;
         /* append_log(key + " hit " + std::to_string(hits) + "\n"); */
     } else {
-        std::cout << "Miss: " << key << std::endl;
+        //std::cout << "Miss: " << key << std::endl;
         auto file_path = "/tmp/entry-" + random_string(20);
-        std::cout << "New file path: " << file_path << std::endl;
+        //std::cout << "New file path: " << file_path << std::endl;
         entry = new CacheEntry(key, file_path);
         entries[key] = entry;
         entry->loading = true;
@@ -167,7 +168,7 @@ std::string Cache::get(std::string key) {
         auto it = keys.end();
         entry->position = --it;
         lock.unlock();
-        std::cout << "Downloading object: " << key << std::endl;
+        //std::cout << "Downloading object: " << key << std::endl;
         entry->download(objsizebytes);
         lock.lock();
         entry->loading = false;
@@ -256,12 +257,12 @@ int put_object(void* buffer, long buffer_size, const char* bucket, const char* k
     /* append_log("put " + std::string(key) + ": " + std::to_string(finish - start) + "\n"); */
     if (!put_object_response.IsSuccess())
     {
-        std::stringstream msg;
-        msg << "PutObject error: " <<
-            put_object_response.GetError().GetExceptionName() << " " <<
-            put_object_response.GetError().GetMessage() << std::endl;
-        std::cout << msg;
-        append_log(msg.str());
+        // std::stringstream msg;
+        // msg << "PutObject error: " <<
+        //     put_object_response.GetError().GetExceptionName() << " " <<
+        //     put_object_response.GetError().GetMessage() << std::endl;
+        //std::cout << msg;
+        // append_log(msg.str());
         return -1;
     } else {
         return 0;
@@ -269,8 +270,8 @@ int put_object(void* buffer, long buffer_size, const char* bucket, const char* k
 }
 
 int get_object(void* buffer, long buffer_size, const char* bucket, const char* key) {
-    std::cout << "In get object: " << std::endl;
-    std::cout << "Getting from bucket: " << bucket << " the key: " << key << std::endl;
+    //std::cout << "In get object: " << std::endl;
+    //std::cout << "Getting from bucket: " << bucket << " the key: " << key << std::endl;
     Aws::S3::Model::GetObjectRequest request;
     request.WithBucket(bucket).WithKey(key);
     request.SetResponseStreamFactory(
@@ -285,18 +286,18 @@ int get_object(void* buffer, long buffer_size, const char* bucket, const char* k
     double start = start_t.tv_sec + ((double) start_t.tv_nsec / 1e9);
     double finish = finish_t.tv_sec + ((double) finish_t.tv_nsec / 1e9);
 
-    std::cout << "Took time: " << (finish - start) << std::endl;
+    //std::cout << "Took time: " << (finish - start) << std::endl;
 
     /* append_log("get " + std::string(key) + ": " + std::to_string(finish - start) + "\n"); */
     if (!get_object_response.IsSuccess())
     {
-        std::stringstream msg;
-        msg << "GetObject error: " << (int) get_object_response.GetError().GetResponseCode() <<
-            " " << get_object_response.GetError().GetMessage() << std::endl <<
-            "BUCKET " << bucket << std::endl <<
-            "key " << key << std::endl;
-        std::cout << msg;
-        append_log(msg.str());
+        // std::stringstream msg;
+        // msg << "GetObject error: " << (int) get_object_response.GetError().GetResponseCode() <<
+        //     " " << get_object_response.GetError().GetMessage() << std::endl <<
+        //     "BUCKET " << bucket << std::endl <<
+        //     "key " << key << std::endl;
+        // std::cout << msg;
+        // append_log(msg.str());
         return -1;
     } else {
         return 0;
@@ -415,10 +416,10 @@ int main(int argc, char** argv)
         bucket = argv[3];
         auto cache_size = std::stoi(argv[4]);
 
-        std::cout << "Object Size " << argv[1] << std::endl;
-        std::cout << "num_threads " << argv[2] << std::endl;
-        std::cout << "bucket " << argv[3] << std::endl;
-        std::cout << "cache size " << argv[4] << std::endl;
+        // std::cout << "Object Size " << argv[1] << std::endl;
+        // std::cout << "num_threads " << argv[2] << std::endl;
+        // std::cout << "bucket " << argv[3] << std::endl;
+        // std::cout << "cache size " << argv[4] << std::endl;
 
         auto region = Aws::Region::US_WEST_2;
         Aws::Client::ClientConfiguration cfg;

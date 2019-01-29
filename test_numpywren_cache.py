@@ -1,6 +1,6 @@
 import argparse
 
-
+import boto3
 
 import time
 import random
@@ -21,6 +21,7 @@ from numpywren.compiler import lpcompile, walk_program, find_parents, find_child
 import numpywren as npw
 import pywren
 import pywren.wrenconfig as wc
+from numpywren import lambdapack as lp
 
 import multiprocessing
 from pywren import ec2standalone
@@ -32,7 +33,7 @@ import concurrent.futures as fs
 
 def run_program_in_pywren(program, num_instances, num_cores):
     def pywren_run(_):
-        job_runner.lambdapack_run(program, timeout=3600, idle_timeout=30)
+        job_runner.lambdapack_run(program, timeout=3600, idle_timeout=120)
     default_npw_config = npw.config.default()
     pywren_config = wc.default()
     npw_config = npw.config.default()
@@ -40,131 +41,273 @@ def run_program_in_pywren(program, num_instances, num_cores):
     pywren_config['runtime']['s3_key'] = npw_config['runtime']['s3_key']
     
     
-    # pwex = get_executor(num_cores)
-    # futures = pwex.map(pywren_run, range(num_instances*num_cores))
-    # program.start()
+    pwex = get_executor(num_cores)
+    futures = pwex.map(pywren_run, range(num_instances*num_cores), extra_env=EXTRA_ENV)
 
-    executor = fs.ProcessPoolExecutor(num_cores)
-    program.start()
-    futures = executor.submit(job_runner.lambdapack_run, program, timeout=3600, idle_timeout=30)
+    # executor = fs.ProcessPoolExecutor(num_cores)
+    # program.start()
+    # futures = executor.submit(job_runner.lambdapack_run, program, timeout=3600, idle_timeout=30)
     return futures
 
-
+def parse_int(x):
+    if x is None: return 0
+    return int(x)
 
 def benchmark_function(num_instances, 
                        num_cores, 
+                       trial,
                        run_func,
                        args):
     print(pcolor.FAIL, end="")
     print("Running: {0}".format(run_func.__name__))
     print(pcolor.ENDC)
-    
+
+    pwex = get_executor(num_cores)
+
     t = time.time()
-    program, meta =  run_func(*args)
-    t_program = time.time()
-    futures = run_program_in_pywren(program, num_instances, num_cores)
-    #program.start()
-    program.wait()
-    e = time.time()
-    time.sleep(20)
-    program.free()
+    program, meta = run_func(*args)
     L_sharded = meta["outputs"][0]
-    print(pcolor.FAIL, end="")
-    print("L_sharded.shape: {0}".format(L_sharded.shape))
-    print(pcolor.ENDC)
+    pipeline_width = num_cores
+
+    pywren_config = pwex.config
+    e = time.time()
+    print("Program compile took {0} seconds".format(e - t))
+    print("program.hash", program.hash)
+    REDIS_CLIENT = program.control_plane.client
+    done_counts = []
+    ready_counts = []
+    post_op_counts = []
+    not_ready_counts = []
+    running_counts = []
+    sqs_invis_counts = []
+    sqs_vis_counts = []
+    up_workers_counts = []
+    busy_workers_counts = []
+    read_objects = []
+    write_objects = []
+    all_read_timeouts = []
+    all_write_timeouts = []
+    all_redis_timeouts = []
+    times = [time.time()]
+    flops = [0]
+    reads = [0]
+    writes = [0]
+    lru=False
+    eager=False
+    standalone=True
+    log_granularity = 5
+    print("LRU", lru)
+    print("eager", eager)
+    exp = {}
+    exp["redis_done_counts"] = done_counts
+    exp["redis_ready_counts"] = ready_counts
+    exp["redis_post_op_counts"] = post_op_counts
+    exp["redis_not_ready_counts"] = not_ready_counts
+    exp["redis_running_counts"] = running_counts
+    exp["sqs_invis_counts"] = sqs_invis_counts
+    exp["sqs_vis_counts"] = sqs_vis_counts
+    exp["busy_workers"] = busy_workers_counts
+    exp["up_workers"] = up_workers_counts
+    exp["times"] = times
+    exp["problem_size"] = MAT.shape
+    exp["shard_size"] = MAT.shard_sizes
+    exp["flops"] = flops
+    exp["reads"] = reads
+    exp["writes"] = writes
+    exp["read_objects"] = read_objects
+    exp["write_objects"] = write_objects
+    exp["read_timeouts"] = all_read_timeouts
+    exp["write_timeouts"] = all_write_timeouts 
+    exp["redis_timeouts"] = all_redis_timeouts 
+    exp["trial"] = trial
+    exp["standalone"] = standalone
+    exp["time_steps"] = 1
+    exp["failed"] = False
+    exp["log_granularity"] = log_granularity
+    INFO_FREQ = 10
+
+    program.start()
+    t = time.time()
+    all_futures = pwex.map(lambda x: job_runner.lambdapack_run(program, pipeline_width=1, timeout=3600), range(NUM_CORES*NUM_INSTANCES), extra_env=EXTRA_ENV)
+    start_time = time.time()
+    last_run_time = start_time
+    print(program.program_status())
+    print("QUEUE URLS", len(program.queue_urls))
+    total_lambda_epochs = NUM_CORES
+    try:
+        while(program.program_status() == lp.PS.RUNNING):
+            time.sleep(log_granularity)
+            curr_time = int(time.time() - start_time)
+            p = program.get_progress()
+            if (p is None):
+                print("no progress...")
+                continue
+            else:
+               p = int(p)
+            times.append(int(time.time()))
+            max_pc = p
+            waiting = 0
+            running = 0
+            for i, queue_url in enumerate(program.queue_urls):
+                client = boto3.client('sqs')
+                attrs = client.get_queue_attributes(QueueUrl=queue_url, AttributeNames=['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible'])['Attributes']
+                waiting += int(attrs["ApproximateNumberOfMessages"])
+                running += int(attrs["ApproximateNumberOfMessagesNotVisible"])
+            sqs_invis_counts.append(running)
+            sqs_vis_counts.append(waiting)
+            busy_workers = REDIS_CLIENT.get("{0}_busy".format(program.hash))
+            sparse_writes  = parse_int(REDIS_CLIENT.get("{0}_write_sparse".format(program.hash)))/1e9
+
+            if (busy_workers == None):
+                busy_workers = 0
+            else:
+                busy_workers = int(busy_workers)
+            up_workers = program.get_up()
+
+            if (up_workers == None):
+                up_workers = 0
+            else:
+                up_workers = int(up_workers)
+            up_workers_counts.append(up_workers)
+            busy_workers_counts.append(busy_workers)
+
+            #print("{2}: Up Workers: {0}, Busy Workers: {1}".format(up_workers, busy_workers, curr_time))
+            #if ((curr_time % INFO_FREQ) == 0):
+            #    print("Waiting: {0}, Currently Processing: {1}".format(waiting, running))
+            #    print("{2}: Up Workers: {0}, Busy Workers: {1}".format(up_workers, busy_workers, curr_time))
+
+            current_gflops = program.get_flops()
+            if (current_gflops is None):
+                current_gflops = 0
+            else:
+                current_gflops = int(current_gflops)/1e9
+
+            flops.append(current_gflops)
+            current_gbytes_read = program.get_read()
+            if (current_gbytes_read is None):
+                current_gbytes_read = 0
+            else:
+                current_gbytes_read = int(current_gbytes_read)/1e9
+
+            reads.append(current_gbytes_read)
+            current_gbytes_write = program.get_write()
+            if (current_gbytes_write is None):
+                current_gbytes_write = 0
+            else:
+                current_gbytes_write = int(current_gbytes_write)/1e9
+            writes.append(current_gbytes_write)
+
+            gflops_rate = flops[-1]/(times[-1] - times[0])
+            greads_rate = reads[-1]/(times[-1] - times[0])
+            gwrites_rate = writes[-1]/(times[-1] - times[0])
+            b = args[0].shard_sizes[0]
+            current_objects_read = (current_gbytes_read*1e9)/(b*b*8)
+            current_objects_write = (current_gbytes_write*1e9)/(b*b*8)
+            read_objects.append(current_objects_read)
+            write_objects.append(current_objects_write)
+            read_rate = read_objects[-1]/(times[-1] - times[0])
+            write_rate = write_objects[-1]/(times[-1] - times[0])
+
+            avg_workers = np.mean(up_workers_counts)
+            smooth_len = 10
+            if (len(flops) > smooth_len + 5):
+                gflops_rate_5_min_window = (flops[-1] - flops[-smooth_len])/(times[-1] - times[-smooth_len])
+                gread_rate_5_min_window = (reads[-1] - reads[-smooth_len])/(times[-1] - times[-smooth_len])
+                gwrite_rate_5_min_window = (writes[-1] - writes[-smooth_len])/(times[-1] - times[-smooth_len])
+                read_rate_5_min_window = (read_objects[-1] - read_objects[-smooth_len])/(times[-1] - times[-smooth_len])
+                write_rate_5_min_window = (write_objects[-1] - write_objects[-smooth_len])/(times[-1] - times[-smooth_len])
+                workers_5_min_window = np.mean(up_workers_counts[-smooth_len:])
+            else:
+                gflops_rate_5_min_window =  "N/A"
+                gread_rate_5_min_window = "N/A"
+                gwrite_rate_5_min_window = "N/A"
+                workers_5_min_window = "N/A"
+                read_rate_5_min_window = "N/A"
+                write_rate_5_min_window = "N/A"
+
+
+            read_timeouts = int(parse_int(REDIS_CLIENT.get("s3.timeouts.read")))
+            write_timeouts = int(parse_int(REDIS_CLIENT.get("s3.timeouts.write")))
+            redis_timeouts = int(parse_int(REDIS_CLIENT.get("redis.timeouts")))
+            all_read_timeouts.append(read_timeouts)
+            all_write_timeouts.append(write_timeouts)
+            all_redis_timeouts.append(redis_timeouts)
+            read_timeouts_fraction = read_timeouts/current_objects_read
+            write_timeouts_fraction = write_timeouts/current_objects_write
+            print("=======================================")
+            print("Max PC is {0}".format(max_pc))
+            print("Waiting: {0}, Currently Processing: {1}".format(waiting, running))
+            print("{2}: Up Workers: {0}, Busy Workers: {1}".format(up_workers, busy_workers, curr_time))
+            print("{0}: Total GFLOPS {1}, Total GBytes Read {2}, Total GBytes Write {3}, Total Gbytes Write Sparse : {4}".format(curr_time, current_gflops, current_gbytes_read, current_gbytes_write, sparse_writes))
+            print("{0}: Average GFLOPS rate {1}, Average GBytes Read rate {2}, Average GBytes Write  rate {3}, Average Worker Count {4}".format(curr_time, gflops_rate, greads_rate, gwrites_rate, avg_workers))
+            print("{0}: Average read txns/s {1}, Average write txns/s {2}".format(curr_time, read_rate, write_rate))
+            print("{0}: smoothed GFLOPS rate {1}, smoothed GBytes Read rate {2}, smoothed GBytes Write  rate {3}, smoothed Worker Count {4}".format(curr_time, gflops_rate_5_min_window, gread_rate_5_min_window, gwrite_rate_5_min_window, workers_5_min_window))
+            print("{0}: smoothed read txns/s {1}, smoothed write txns/s {2}".format(curr_time, read_rate_5_min_window, write_rate_5_min_window))
+            print("{0}: Read timeouts: {1}, Write timeouts: {2}, Redis timeouts: {3}  ".format(curr_time, read_timeouts, write_timeouts, redis_timeouts))
+            print("{0}: Read timeouts fraction: {1}, Write timeouts fraction: {2}".format(curr_time, read_timeouts_fraction, write_timeouts_fraction))
+            print("=======================================")
+
+            time_since_launch = time.time() - last_run_time
+
+            exp["time_steps"] += 1
+
+    except KeyboardInterrupt:
+        exp["failed"] = True
+        program.stop()
+        pass
+    except Exception as e:
+        traceback.print_exc()
+        exp["failed"] = True
+        program.stop()
+        raise
+        pass
+    print(program.program_status())
+    #exp["all_futures"] = all_futures
+    #exp_bytes = dill.dumps(exp)
+    #client = boto3.client('s3')
+    #client.put_object(Key="lambdapack/{0}/runtime.pickle".format(program.hash), Body=exp_bytes, Bucket=program.bucket)
+    print("=======================")
+    print("=======================")
+    print("Execution Summary:")
+    print("Executed Program ID: {0}".format(program.hash))
+    print("Program Success: {0}".format((not exp["failed"])))
+    print("Problem Size: {0}".format(exp["problem_size"]))
+    print("Shard Size: {0}".format(exp["shard_size"]))
+    print("Total Execution time: {0}".format(times[-1] - times[0]))
+    print("Average Flop Rate (GFlop/s): {0}".format(exp["flops"][-1]/(1e-6+times[-1] - times[0])))
+
+
+    
+    # t_all = time.time()
+    # program, meta =  run_func(*args)
+    # t_program = time.time()
+    # futures = run_program_in_pywren(program, num_instances, num_cores)
+    # program.start()
+    # t = time.time()
+    # program.start()
+    # program.wait()
+    # e = time.time()
+    # time.sleep(5)
+    # #program.free()
+    # L_sharded = meta["outputs"][0]
+    
+
     ret_dict = {}
-    ret_dict['total_time_te'] = (t, e)
-    ret_dict['total_time'] = e-t
+    ret_dict['num_cores_per_instance'] = NUM_CORES
+    ret_dict['num_instances'] = NUM_INSTANCES
+    ret_dict['block_size'] = BLOCK_SIZE
+    ret_dict['block_mat_size'] = NUM_BLOCK_ROWS 
+    ret_dict['use_cache'] = USE_CACHE
+    ret_dict['function'] = run_func.__name__
+    ret_dict.update(exp)
     np.save("{0}/{1}.npy".format(RESULT_DIR, OUTPUT_NAME()), ret_dict)
 
+
     print(pcolor.FAIL, end="")
-    print("Total time: {0} seconds".format(ret_dict['total_time']), end="")
+    print("Finished and saved {0}".format("{0}/{1}.npy".format(RESULT_DIR, OUTPUT_NAME())))
     print(pcolor.ENDC)
 
 
-
-
-# def test_tsqr_lambda():
-#     np.random.seed(1)
-#     size = 256
-#     shard_size = 32
-#     X = np.random.randn(size, shard_size)
-#     Q,R = np.linalg.qr(X)
-#     q0, r0 = np.linalg.qr(X[:2,:2])
-#     q1, r1 = np.linalg.qr(X[2:,:2])
-#     r2 = np.linalg.qr(np.vstack((r0,r1)))[1]
-#     shard_sizes = (shard_size, X.shape[1])
-#     X_sharded = BigMatrix("tsqr_test_X", shape=X.shape, shard_sizes=shard_sizes, write_header=True)
-#     shard_matrix(X_sharded, X)
-#     program, meta = tsqr(X_sharded)
-#     executor = fs.ProcessPoolExecutor(1)
-#     print("starting program")
-#     program.start()
-#     futures = run_program_in_pywren(program)
-#     program.wait()
-#     program.free()
-#     R_sharded = meta["outputs"][0]
-#     num_tree_levels = int(np.log(np.ceil(size/shard_size))/np.log(2))
-#     print("num_tree_levels", num_tree_levels)
-#     R_npw = R_sharded.get_block(max(num_tree_levels, 0), 0)
-#     sign_matrix_local = np.eye(R.shape[0])
-#     sign_matrix_remote = np.eye(R.shape[0])
-#     sign_matrix_local[np.where(np.diag(R) <= 0)]  *= -1
-#     sign_matrix_remote[np.where(np.diag(R_npw) <= 0)]  *= -1
-#     # make the signs match
-#     R_npw *= np.diag(sign_matrix_remote)[:, np.newaxis]
-#     R  *= np.diag(sign_matrix_local)[:, np.newaxis]
-#     assert(np.allclose(R_npw, R))
-
-
-
-# def test_gemm_lambda():
-#     size = 32
-#     A = np.random.randn(size, size)
-#     B = np.random.randn(size, size)
-#     C = np.dot(A, B)
-#     shard_sizes = (8,8)
-#     A_sharded = BigMatrix("Gemm_test_A", shape=A.shape, shard_sizes=shard_sizes, write_header=True)
-#     B_sharded = BigMatrix("Gemm_test_B", shape=A.shape, shard_sizes=shard_sizes, write_header=True)
-#     shard_matrix(A_sharded, A)
-#     shard_matrix(B_sharded, B)
-#     program, meta = gemm(A_sharded, B_sharded)
-#     executor = fs.ProcessPoolExecutor(1)
-#     program.start()
-#     run_program_in_pywren(program)
-#     program.wait()
-#     program.free()
-#     C_sharded = meta["outputs"][0]
-#     C_npw = C_sharded.numpy()
-#     assert(np.allclose(C_npw, C))
-#     return
-
-
-# def test_qr_lambda():
-#     N = 16
-#     shard_size = 4
-#     shard_sizes = (shard_size, shard_size)
-#     X = np.random.randn(N, N)
-#     X_sharded = BigMatrix("QR_input_X", shape=X.shape, shard_sizes=shard_sizes, write_header=True)
-#     N_blocks = X_sharded.num_blocks(0)
-#     shard_matrix(X_sharded, X)
-#     program, meta = qr(X_sharded)
-#     program.start()
-#     print("starting program...")
-#     futures = run_program_in_pywren(program)
-#     program.wait()
-#     program.free()
-#     Rs = meta["outputs"][0]
-#     R_remote = Rs.get_block(N_blocks - 1, N_blocks - 1, 0)
-#     R_local = np.linalg.qr(X)[1][-shard_size:, -shard_size:]
-#     sign_matrix_local = np.eye(R_local.shape[0])
-#     sign_matrix_remote = np.eye(R_local.shape[0])
-#     sign_matrix_local[np.where(np.diag(R_local) <= 0)]  *= -1
-#     sign_matrix_remote[np.where(np.diag(R_remote) <= 0)]  *= -1
-#     # make the signs match
-#     R_remote *= np.diag(sign_matrix_remote)[:, np.newaxis]
-#     R_local  *= np.diag(sign_matrix_local)[:, np.newaxis]
-#     assert(np.allclose(R_local, R_remote))
 
 
 
@@ -197,13 +340,13 @@ def launch_many_instances(num_instances, **kwargs):
         #config['standalone']['sqs_queue_name'] = gen_instance_unique_name(sqs, i)
         #create_sqs_queue(config['standalone']['sqs_queue_name'])
         # inst_list += launch_instances(config, **default_extra_args)
-        p = multiprocessing.Process(target=launch_instances, args=(config, default_extra_args))
+        p = multiprocessing.Process(target=launch_instances, args=(config, default_extra_args, i))
         inst_list.append(p)
         p.start()
         time.sleep(1)
     for p in inst_list:
         p.join()
-def launch_instances(config, kwargs):
+def launch_instances(config, kwargs, i=1):
     '''From pywren.ec2standalone and modified to work for multiple sqs queues.'''
     sc = config['standalone']
     aws_region = config['account']['aws_region']
@@ -228,7 +371,7 @@ def launch_instances(config, kwargs):
                                                sc['target_ami'], aws_region,
                                                sc['ec2_ssh_key'],
                                                sc['ec2_instance_type'],
-                                               sc['instance_name'],
+                                               "{0}-{1}".format(sc['instance_name'], i),
                                                sc['instance_profile_name'],
                                                sc['sqs_queue_name'],
                                                config['s3']['bucket'],
@@ -321,7 +464,8 @@ def initialize(args):
     
 
     
-    OUTPUT_NAME = lambda : "{0}_wc_{1}__{2}_{3}--{4}".format(args.run_func, args.with_cache, BLOCK_SIZE, NUM_BLOCK_ROWS, TRIAL_NUMBER)
+    OUTPUT_NAME = lambda : "{0}_wc_{1}__{2}_{3}_{4}_{5}--{6}".format(args.run_func, args.use_cache, BLOCK_SIZE, NUM_BLOCK_ROWS, NUM_INSTANCES, NUM_CORES, TRIAL_NUMBER)
+    print(OUTPUT_NAME())
     BENCHMARK_DIR = SAVE_FOLDER
     FIGURE_DIR = '{0}/figures'.format(BENCHMARK_DIR)
     MAT_DIR = '{0}/mat_data'.format(BENCHMARK_DIR)
@@ -369,7 +513,7 @@ def initialize(args):
     MAT = gen_sharded_mat(pwex_l, config, BLOCK_SIZE*NUM_BLOCK_ROWS, BLOCK_SIZE, num_rows_per_block=BLOCK_SIZE, save_path=mat_dat_path, args=args)
     print()
 
-    if args.launch_group and False:
+    if args.launch_group:
         print(pcolor.FAIL+"Launching instances..."+pcolor.ENDC)
         launch_instance_group(NUM_INSTANCES,NUM_CORES,cache_size=40)
         print(pcolor.OKGREEN+"Finished launching."+pcolor.ENDC)
@@ -395,7 +539,7 @@ if __name__ == "__main__":
     parser.add_argument('num_cores_per_instance', type=int)
     parser.add_argument('launch_group', type=str)
     parser.add_argument('terminate_after', type=str)
-    parser.add_argument('trial_number', type=str)
+    parser.add_argument('trial_number', type=int)
     parser.add_argument('run_func', type=str)
     parser.add_argument('save_folder', type=str)
     parser.add_argument('use_cache', type=str)
@@ -410,6 +554,9 @@ if __name__ == "__main__":
     args.launch_group = (args.launch_group.lower() == 'true')
     args.terminate_after = (args.terminate_after.lower() == 'true')
     args.use_cache = (args.use_cache.lower() == 'true')
+
+    global USE_CACHE
+    USE_CACHE = args.use_cache
 
     print(pcolor.OKBLUE,end="")
     print(args,end="")
@@ -428,7 +575,7 @@ if __name__ == "__main__":
         a = [MAT]
         if args.run_func == 'gemm':
             a = [MAT, MAT]
-        benchmark_function(num_instances=NUM_INSTANCES, num_cores=NUM_CORES, run_func=run_func, args=a)
+        benchmark_function(num_instances=NUM_INSTANCES, num_cores=NUM_CORES, trial=TRIAL_NUMBER, run_func=run_func, args=a)
         e = time.time()
         print(s, e, (e-s))
 

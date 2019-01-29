@@ -99,7 +99,7 @@ int run_benchmark_pins(int num, int unique_, double *start_times_, double *finis
     unique = unique_;
     zmq::context_t context (1);
     pthread_t workers[num_threads];
-    std::cout << "Creating threadpool of size: " << num_threads << std::endl;
+    //std::cout << "Creating threadpool of size: " << num_threads << std::endl;
     for (int i = 0; i < num_threads; i ++) {
         pthread_create (workers + i, NULL, pins_worker, &context);
     }
@@ -173,7 +173,7 @@ int pin_objects(long num_objects, const char** keys_, double *start_times_, doub
     keys = keys_;
     zmq::context_t context (1);
     pthread_t workers[num_threads];
-    std::cout << "Creating threadpool of size: " << num_threads << std::endl;
+    //std::cout << "Creating threadpool of size: " << num_threads << std::endl;
     for (int i = 0; i < num_threads; i ++) {
         pthread_create (workers + i, NULL, pin_objects_worker, &context);
     }
@@ -218,7 +218,7 @@ int release_objects(long num_objects, const char** keys_, int num_threads)
     keys = keys_;
     zmq::context_t context (1);
     pthread_t workers[num_threads];
-    std::cout << "Creating threadpool of size: " << num_threads << std::endl;
+    //std::cout << "Creating threadpool of size: " << num_threads << std::endl;
     for (int i = 0; i < num_threads; i ++) {
         pthread_create (workers + i, NULL, release_objects_worker, &context);
     }
@@ -236,7 +236,7 @@ void *pin_objects_worker2(void *arg) {
     zmq::socket_t rel_socket(*context, ZMQ_REQ);
     rel_socket.connect("ipc:///tmp/local_cache_release");
 
-    std::cout << "Contex acquired and connected to socket: " << std::endl;
+    //std::cout << "Contex acquired and connected to socket: " << std::endl;
 
     int task;
     while ((task = get_task()) < num_tasks) {
@@ -257,8 +257,8 @@ void *pin_objects_worker2(void *arg) {
         //*start = start_t.tv_sec + ((double) start_t.tv_nsec / 1e9);
         memcpy (msg + 1, key.c_str(), len);
 
-        std::cout << "On task: " << task << " out of " << num_tasks << std::endl;
-        std::cout << "Requesting key: " << key << std::endl;
+        //std::cout << "On task: " << task << " out of " << num_tasks << std::endl;
+        //std::cout << "Requesting key: " << key << std::endl;
 
         socket.send (request);
 
@@ -266,16 +266,16 @@ void *pin_objects_worker2(void *arg) {
         zmq::message_t reply;
         socket.recv (&reply);
 
-        std::cout << "Received reply: " << std::endl;
+        //std::cout << "Received reply: " << std::endl;
 
         std::string path = std::string((char *) reply.data());
 
-        std::cout << "Got path to file: " << path << std::endl;
+        //std::cout << "Got path to file: " << path << std::endl;
 
 
         memcpy ((char *)rets[task], path.c_str(), 32);
 
-        std::cout << "Copied path to file: " << (char *) rets[task] << std::endl;
+        //std::cout << "Copied path to file: " << (char *) rets[task] << std::endl;
 
         //fd = open(path.c_str(), O_RDWR);
         //fstat(fd, &stat);
@@ -307,7 +307,7 @@ int pin_objects2(long num_objects, const char** keys_, const char** rets_, int n
     rets = rets_;
     zmq::context_t context (1);
     pthread_t workers[num_threads];
-    std::cout << "Creating threadpool of size: " << num_threads << std::endl;
+    //std::cout << "Creating threadpool of size: " << num_threads << std::endl;
     for (int i = 0; i < num_threads; i ++) {
         pthread_create (workers + i, NULL, pin_objects_worker2, &context);
     }

@@ -302,11 +302,11 @@ class RemoteWrite(RemoteInstruction):
         self.start_time = time.time()
         if (self.result is None):
             cache_key = (self.matrix.key, self.matrix.bucket, self.matrix.true_block_idx(*self.bidxs))
-            if (self.cache != None):
+            if (False and self.cache != None):
               # write to the cache
               self.cache[cache_key] = self.data_loc[self.data_idx]
             backoff = 0.2
-            #print(f"Writing to {self.matrix} at {self.bidxs}")
+            print(f"Writing to {self.matrix} at {self.bidxs}")
             while (True):
               try:
                 print("Writing to ", self.bidxs)
@@ -360,7 +360,7 @@ class RemoteCall(RemoteInstruction):
               pyarg_list.append(arg.result)
             elif (isinstance(arg, float)):
               pyarg_list.append(arg)
-          #print("CALLING COMPUTE", self.compute)
+          print("CALLING COMPUTE", self.compute)
           results = self.compute(*pyarg_list, **self.kwargs)
           if (isinstance(results, tuple) and len(results) != len(self.results)):
             raise Exception("Expected {0} results, got {1}".format(len(self.results), len(results)))
@@ -403,7 +403,7 @@ class RemoteReturn(RemoteInstruction):
         self.i_code = OC.RET
         self.result = None
     async def __call__(self, client, return_hash):
-      logger.debug("RETURNING...")
+      #logger.debug("RETURNING...")
       print("RETURNING....")
       loop = asyncio.get_event_loop()
       self.start_time = time.time()
@@ -540,14 +540,14 @@ class LambdaPackProgram(object):
           if (ret_code == PS.EXCEPTION and tb != None):
             self.handle_exception(" EXCEPTION", tb=tb, expr_idx=expr_idx, var_values=var_values)
           ready_children = []
-          #print(f"ALL CHILDREN {children}")
+          print(f"ALL CHILDREN {children}")
           for child in children:
               my_child_edge = self._edge_key(expr_idx, var_values, *child)
               child_edge_sum_key = self._node_edge_sum_key(*child)
               # redis transaction should be atomic
               tp = fs.ThreadPoolExecutor(1)
               val_future = tp.submit(conditional_increment, self.control_plane.client, child_edge_sum_key, my_child_edge)
-              done, not_done = fs.wait([val_future], timeout=60)
+              done, not_done = fs.wait([val_future], timeout=120)
               if len(done) == 0:
                 raise Exception("Redis Atomic Set and Sum timed out!")
               val = val_future.result()
@@ -592,7 +592,7 @@ class LambdaPackProgram(object):
             return_edge = self._edge_key(expr_idx, var_values, return_key, {})
             tp = fs.ThreadPoolExecutor(1)
             val_future = tp.submit(conditional_increment, self.control_plane.client, return_key, return_edge)
-            done, not_done = fs.wait([val_future], timeout=60)
+            done, not_done = fs.wait([val_future], timeout=120)
             if len(done) == 0:
               raise Exception("Redis Atomic Set and Sum timed out!")
             val = val_future.result()
@@ -690,13 +690,13 @@ class LambdaPackProgram(object):
     def set_up(self, value):
       put(self.control_plane.client,self.control_plane.client, self.up, value)
 
-    def wait(self, sleep_time=1):
-        status = self.program_status()
+    def wait(self, sleep_time=20):
+        self.status = self.program_status()
         # TODO reinstate status change
-        while (status == PS.RUNNING):
+        while (self.status == PS.RUNNING):
               time.sleep(sleep_time)
-              status = self.program_status()
-              print("Program status is ", status)
+              self.status = self.program_status()
+              print("Program status is ", self.status)
 
     def free(self):
         for queue_url in self.queue_urls:

@@ -357,7 +357,7 @@ async def lambdapack_run_async(loop, program, computer, cache, shared_state, pip
     except Exception as e:
         #print(e)
         traceback.print_exc()
-        raise
+        #raise
     return
 
 
